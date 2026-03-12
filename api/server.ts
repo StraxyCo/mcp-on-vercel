@@ -1,77 +1,79 @@
 export default async function handler(req: any, res: any) {
   try {
-    // 1. SECURITY LOCK
     const bridgeAuth = req.headers['x-bridge-auth'];
     if (bridgeAuth !== process.env.BRIDGE_PASSWORD) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
     const body = req.body || {};
+    const token = process.env.FIGMA_PERSONAL_ACCESS_TOKEN;
 
-    // 2. STEP ONE: THE INITIALIZE HANDSHAKE (This is what's failing)
+    // 1. HANDSHAKE
     if (body.method === 'initialize') {
       return res.status(200).json({
-        jsonrpc: "2.0",
-        id: body.id,
+        jsonrpc: "2.0", id: body.id,
         result: {
           protocolVersion: "2024-11-05",
-          capabilities: {
-            tools: {} 
-          },
-          serverInfo: {
-            name: "figma-bridge",
-            version: "1.0.0"
-          }
+          capabilities: { tools: {} },
+          serverInfo: { name: "figma-ultimate-bridge", version: "2.0.0" }
         }
       });
     }
 
-    // 3. STEP TWO: LIST TOOLS
+    // 2. TOOL DEFINITIONS
     if (body.method === 'tools/list') {
       return res.status(200).json({
-        jsonrpc: "2.0",
-        id: body.id,
+        jsonrpc: "2.0", id: body.id,
         result: {
           tools: [
-            {
-              name: "get_figma_file",
-              description: "Gets the structure of a Figma file.",
-              inputSchema: {
-                type: "object",
-                properties: {
-                  fileKey: { type: "string" }
-                },
-                required: ["fileKey"]
-              }
-            }
+            { name: "get_figma_file", description: "Map the file structure (Pages/Frames).", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
+            { name: "get_figma_nodes", description: "Inspect CSS/details of specific nodes.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" } }, required: ["fileKey", "nodeIds"] } },
+            { name: "get_node_images", description: "Generate PNG preview URLs for nodes.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" } }, required: ["fileKey", "nodeIds"] } },
+            { name: "get_file_styles", description: "List all shared styles (Colors/Fonts).", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
+            { name: "get_figma_comments", description: "Read all comments/feedback in the file.", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
+            { name: "get_file_versions", description: "See version history/recent changes.", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
+            { name: "post_figma_comment", description: "Post a new comment to a node.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeId: { type: "string" }, message: { type: "string" } }, required: ["fileKey", "nodeId", "message"] } }
           ]
         }
       });
     }
 
-    // 4. STEP THREE: TOOL CALLS
+    // 3. TOOL EXECUTION
     if (body.method === 'tools/call') {
       const { name, arguments: args } = body.params || {};
-      if (name === 'get_figma_file') {
-        const token = process.env.FIGMA_PERSONAL_ACCESS_TOKEN;
-        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}`, {
-          headers: { 'X-Figma-Token': token! }
-        });
-        const data: any = await response.json();
-        return res.status(200).json({
-          jsonrpc: "2.0",
-          id: body.id,
-          result: {
-            content: [{ type: "text", text: JSON.stringify({ name: data.name }, null, 2) }]
-          }
-        });
+      let url = "";
+      let method = "GET";
+      let payload: any = null;
+
+      switch (name) {
+        case "get_figma_file": url = `https://api.figma.com/v1/files/${args.fileKey}?depth=2`; break;
+        case "get_figma_nodes": url = `https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`; break;
+        case "get_node_images": url = `https://api.figma.com/v1/images/${args.fileKey}?ids=${args.nodeIds}&format=png`; break;
+        case "get_file_styles": url = `https://api.figma.com/v1/files/${args.fileKey}/styles`; break;
+        case "get_figma_comments": url = `https://api.figma.com/v1/files/${args.fileKey}/comments`; break;
+        case "get_file_versions": url = `https://api.figma.com/v1/files/${args.fileKey}/versions`; break;
+        case "post_figma_comment": 
+          url = `https://api.figma.com/v1/files/${args.fileKey}/comments`; 
+          method = "POST";
+          payload = { client_meta: { node_id: args.nodeId }, message: args.message };
+          break;
       }
+
+      const response = await fetch(url, {
+        method,
+        headers: { 'X-Figma-Token': token!, 'Content-Type': 'application/json' },
+        body: payload ? JSON.stringify(payload) : null
+      });
+      const data = await response.json();
+
+      return res.status(200).json({
+        jsonrpc: "2.0", id: body.id,
+        result: { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] }
+      });
     }
 
-    // Default response for other MCP notifications
     return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: {} });
-
   } catch (err: any) {
-    return res.status(500).json({ error: "Server Error", message: err.message });
+    return res.status(500).json({ error: "Bridge Error", message: err.message });
   }
 }
