@@ -8,14 +8,30 @@ export default async function handler(req: any, res: any) {
 
     const body = req.body || {};
 
-    // 2. HANDLE "LIST TOOLS" (The Handshake)
+    // 2. STEP ONE: THE INITIALIZE HANDSHAKE (This is what's failing)
+    if (body.method === 'initialize') {
+      return res.status(200).json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: {
+            tools: {} 
+          },
+          serverInfo: {
+            name: "figma-bridge",
+            version: "1.0.0"
+          }
+        }
+      });
+    }
+
+    // 3. STEP TWO: LIST TOOLS
     if (body.method === 'tools/list') {
       return res.status(200).json({
         jsonrpc: "2.0",
         id: body.id,
         result: {
-          // This protocolVersion is often what "invalid_union" is looking for
-          protocolVersion: "2024-11-05", 
           tools: [
             {
               name: "get_figma_file",
@@ -33,32 +49,27 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // 3. HANDLE TOOL CALLS
+    // 4. STEP THREE: TOOL CALLS
     if (body.method === 'tools/call') {
       const { name, arguments: args } = body.params || {};
-
       if (name === 'get_figma_file') {
         const token = process.env.FIGMA_PERSONAL_ACCESS_TOKEN;
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}`, {
           headers: { 'X-Figma-Token': token! }
         });
         const data: any = await response.json();
-
         return res.status(200).json({
           jsonrpc: "2.0",
           id: body.id,
           result: {
-            content: [{ 
-              type: "text", 
-              text: JSON.stringify({ name: data.name, status: "Success" }, null, 2) 
-            }]
+            content: [{ type: "text", text: JSON.stringify({ name: data.name }, null, 2) }]
           }
         });
       }
     }
 
-    // 4. BROWSER FALLBACK
-    return res.status(200).json({ message: "Bridge active." });
+    // Default response for other MCP notifications
+    return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: {} });
 
   } catch (err: any) {
     return res.status(500).json({ error: "Server Error", message: err.message });
