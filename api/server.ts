@@ -6,16 +6,16 @@ export default async function handler(req: any, res: any) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // 2. PARSE THE BODY (Dust sends a POST with a JSON body)
     const body = req.body || {};
 
-    // 3. HANDLE "LIST TOOLS"
-    // Dust sends: { "jsonrpc": "2.0", "method": "tools/list", "id": ... }
+    // 2. HANDLE "LIST TOOLS" (The Handshake)
     if (body.method === 'tools/list') {
       return res.status(200).json({
         jsonrpc: "2.0",
         id: body.id,
         result: {
+          // This protocolVersion is often what "invalid_union" is looking for
+          protocolVersion: "2024-11-05", 
           tools: [
             {
               name: "get_figma_file",
@@ -33,7 +33,7 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // 4. HANDLE TOOL CALLS
+    // 3. HANDLE TOOL CALLS
     if (body.method === 'tools/call') {
       const { name, arguments: args } = body.params || {};
 
@@ -50,15 +50,15 @@ export default async function handler(req: any, res: any) {
           result: {
             content: [{ 
               type: "text", 
-              text: JSON.stringify({ name: data.name, status: "Connected" }, null, 2) 
+              text: JSON.stringify({ name: data.name, status: "Success" }, null, 2) 
             }]
           }
         });
       }
     }
 
-    // 5. CATCH-ALL FOR BROWSER VISITS
-    return res.status(200).json({ message: "Bridge active. Waiting for MCP request." });
+    // 4. BROWSER FALLBACK
+    return res.status(200).json({ message: "Bridge active." });
 
   } catch (err: any) {
     return res.status(500).json({ error: "Server Error", message: err.message });
