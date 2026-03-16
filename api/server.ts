@@ -1,79 +1,128 @@
-export default async function handler(req: any, res: any) {
+import { VercelRequest, VercelResponse } from '@vercel/node';
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
+    // 1. Auth Check (Bridge Password)
     const bridgeAuth = req.headers['x-bridge-auth'];
     if (bridgeAuth !== process.env.BRIDGE_PASSWORD) {
-      return res.status(401).json({ error: "Unauthorized" });
+      return res.status(401).json({ error: "Unauthorized Bridge Access" });
     }
 
     const body = req.body || {};
-    const token = process.env.FIGMA_PERSONAL_ACCESS_TOKEN;
 
-    // 1. HANDSHAKE
+    // 2. Initialize MCP
     if (body.method === 'initialize') {
       return res.status(200).json({
         jsonrpc: "2.0", id: body.id,
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-bridge-stable", version: "2.2.0" }
+          serverInfo: { name: "figma-factory-bridge", version: "3.0.0" }
         }
       });
     }
 
-    // 2. TOOL DEFINITIONS (Cleaned List)
+    // 3. Define Tools (The Factory Set)
     if (body.method === 'tools/list') {
       return res.status(200).json({
         jsonrpc: "2.0", id: body.id,
         result: {
           tools: [
-            { name: "get_figma_file", description: "Map the file structure (Pages/Frames).", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
-            { name: "get_figma_nodes", description: "Inspect CSS/details of specific nodes.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" } }, required: ["fileKey", "nodeIds"] } },
-            { name: "get_node_images", description: "Generate PNG preview URLs for nodes.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" } }, required: ["fileKey", "nodeIds"] } },
-            { name: "get_file_styles", description: "List all shared styles (Colors/Fonts).", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
-            { name: "get_figma_comments", description: "Read all comments/feedback in the file.", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
-            { name: "get_file_versions", description: "See version history/recent changes.", inputSchema: { type: "object", properties: { fileKey: { type: "string" } }, required: ["fileKey"] } },
-            { name: "post_figma_comment", description: "Post a new comment to a node.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeId: { type: "string" }, message: { type: "string" } }, required: ["fileKey", "nodeId", "message"] } }
+            {
+              name: "get_semantic_node",
+              description: "Extracts Computed CSS, Variables, and Nomenclature signals ([Slot], Container/ names).",
+              inputSchema: { 
+                type: "object", 
+                properties: { 
+                  fileKey: { type: "string" }, 
+                  nodeIds: { type: "string" },
+                  isDisko: { type: "boolean", description: "Set to true if using Agency (DISKO) workspace." }
+                }, 
+                required: ["fileKey", "nodeIds"] 
+              }
+            },
+            {
+              name: "get_node_checksum",
+              description: "Generates a structural fingerprint of a node's children and visibility for memory logic.",
+              inputSchema: { 
+                type: "object", 
+                properties: { 
+                  fileKey: { type: "string" }, 
+                  nodeIds: { type: "string" },
+                  isDisko: { type: "boolean" }
+                }, 
+                required: ["fileKey", "nodeIds"] 
+              }
+            },
+            {
+              name: "get_figma_file",
+              description: "Maps the file structure (pages, frames).",
+              inputSchema: { 
+                type: "object", 
+                properties: { 
+                  fileKey: { type: "string" },
+                  isDisko: { type: "boolean" }
+                }, 
+                required: ["fileKey"] 
+              }
+            }
           ]
         }
       });
     }
 
-    // 3. TOOL EXECUTION
+    // 4. Tool Execution & Dual-Token Logic (STRAXY vs DISKO)
     if (body.method === 'tools/call') {
       const { name, arguments: args } = body.params || {};
-      let url = "";
-      let method = "GET";
-      let payload: any = null;
+      
+      // Token Selection Logic
+      // Defaults to STRAXY unless isDisko is explicitly true
+      const figmaToken = args.isDisko ? process.env.FIGMA_TOKEN_DISKO : process.env.FIGMA_TOKEN_STRAXY;
 
-      switch (name) {
-        case "get_figma_file": url = `https://api.figma.com/v1/files/${args.fileKey}?depth=2`; break;
-        case "get_figma_nodes": url = `https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`; break;
-        case "get_node_images": url = `https://api.figma.com/v1/images/${args.fileKey}?ids=${args.nodeIds}&format=png`; break;
-        case "get_file_styles": url = `https://api.figma.com/v1/files/${args.fileKey}/styles`; break;
-        case "get_figma_comments": url = `https://api.figma.com/v1/files/${args.fileKey}/comments`; break;
-        case "get_file_versions": url = `https://api.figma.com/v1/files/${args.fileKey}/versions`; break;
-        case "post_figma_comment": 
-          url = `https://api.figma.com/v1/files/${args.fileKey}/comments`; 
-          method = "POST";
-          payload = { client_meta: { node_id: args.nodeId }, message: args.message };
-          break;
+      const baseUrl = `https://api.figma.com/v1/files/${args.fileKey}`;
+      const headers = { 'X-Figma-Token': figmaToken! };
+
+      if (name === "get_semantic_node" || name === "get_node_checksum") {
+        const response = await fetch(`${baseUrl}/nodes?ids=${args.nodeIds}`, { headers });
+        const data: any = await response.json();
+        
+        if (!data.nodes || !data.nodes[args.nodeIds]) {
+          throw new Error(`Node ${args.nodeIds} not found. Ensure you are using the correct token (STRAXY vs DISKO).`);
+        }
+        
+        const node = data.nodes[args.nodeIds].document;
+
+        if (name === "get_semantic_node") {
+          const semantic = {
+            name: node.name,
+            type: node.type,
+            layout: { 
+              mode: node.layoutMode, 
+              padding: `${node.paddingTop}px ${node.paddingRight}px ${node.paddingBottom}px ${node.paddingLeft}px`, 
+              gap: node.itemSpacing 
+            },
+            logic: { visible: node.visible, boundVariables: node.boundVariables },
+            nomenclature: node.name.includes('[Slot]') ? 'DYNAMIC_SLOT' : (node.name.includes('/') ? 'STRUCTURED' : 'GENERIC')
+          };
+          return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: JSON.stringify(semantic, null, 2) }] } });
+        }
+
+        if (name === "get_node_checksum") {
+          const fingerprint = node.children?.map((c: any) => `${c.name}:${c.visible}`).join('|') || "leaf";
+          return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: `STRUCTURAL_ID:${fingerprint}` }] } });
+        }
       }
 
-      const response = await fetch(url, {
-        method,
-        headers: { 'X-Figma-Token': token!, 'Content-Type': 'application/json' },
-        body: payload ? JSON.stringify(payload) : null
-      });
-      const data = await response.json();
-
-      return res.status(200).json({
-        jsonrpc: "2.0", id: body.id,
-        result: { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] }
-      });
+      if (name === "get_figma_file") {
+        const response = await fetch(baseUrl, { headers });
+        const data = await response.json();
+        return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] } });
+      }
     }
 
-    return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: {} });
-  } catch (err: any) {
-    return res.status(500).json({ error: "Bridge Error", message: err.message });
+    return res.status(404).json({ error: "Method not found" });
+
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
   }
 }
