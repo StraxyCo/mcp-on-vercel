@@ -9,120 +9,97 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const body = req.body || {};
-    const requestId = body.id || null; // Ensure we always have an ID for JSON-RPC
+    const requestId = body.id || null; // Always return the request ID
 
-    // 2. Initialize MCP (Handshake)
+    // 2. HANDSHAKE (Initialize)
     if (body.method === 'initialize') {
       return res.status(200).json({
         jsonrpc: "2.0", id: requestId,
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-factory-bridge", version: "3.1.0" }
+          serverInfo: { name: "figma-factory-bridge", version: "3.2.0" }
         }
       });
     }
 
-    // 3. Define Tools (The Factory Set)
+    // 3. TOOL DEFINITIONS (Stable Schema)
     if (body.method === 'tools/list') {
       return res.status(200).json({
         jsonrpc: "2.0", id: requestId,
         result: {
           tools: [
-            {
-              name: "get_semantic_node",
-              description: "Extracts Computed CSS, Variables, and Nomenclature signals.",
-              inputSchema: { 
-                type: "object", 
-                properties: { 
-                  fileKey: { type: "string" }, 
-                  nodeIds: { type: "string" },
-                  isDisko: { type: "boolean" }
-                }, 
-                required: ["fileKey", "nodeIds"] 
-              }
+            { 
+              name: "get_figma_file", 
+              description: "Map the file structure. Use isDisko: true for DISKO workspace.", 
+              inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } 
             },
-            {
-              name: "get_node_checksum",
-              description: "Generates a structural fingerprint for memory logic.",
-              inputSchema: { 
-                type: "object", 
-                properties: { 
-                  fileKey: { type: "string" }, 
-                  nodeIds: { type: "string" },
-                  isDisko: { type: "boolean" }
-                }, 
-                required: ["fileKey", "nodeIds"] 
-              }
+            { 
+              name: "get_semantic_node", 
+              description: "Extracts Computed CSS, Variables, and Nomenclature signals.", 
+              inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } 
             },
-            {
-              name: "get_figma_file",
-              description: "Maps the file structure (pages, frames).",
-              inputSchema: { 
-                type: "object", 
-                properties: { 
-                  fileKey: { type: "string" },
-                  isDisko: { type: "boolean" }
-                }, 
-                required: ["fileKey"] 
-              }
+            { 
+              name: "get_node_checksum", 
+              description: "Generates a structural fingerprint for memory logic.", 
+              inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } 
             }
           ]
         }
       });
     }
 
-    // 4. Tool Execution (Switch logic from your stable version)
+    // 4. TOOL EXECUTION (Stable Switch Logic)
     if (body.method === 'tools/call') {
       const { name, arguments: args } = body.params || {};
-      const figmaToken = args.isDisko ? process.env.FIGMA_TOKEN_DISKO : process.env.FIGMA_TOKEN_STRAXY;
-      const headers = { 'X-Figma-Token': figmaToken! };
+      
+      // Token Selection (STRAXY vs DISKO)
+      const token = args.isDisko ? process.env.FIGMA_TOKEN_DISKO : process.env.FIGMA_TOKEN_STRAXY;
+      const headers = { 'X-Figma-Token': token!, 'Content-Type': 'application/json' };
       const baseUrl = "https://api.figma.com/v1";
 
-      let resultText = "";
+      let responseData: any = null;
 
-      switch (name) {
-        case "get_semantic_node":
-        case "get_node_checksum": {
-          const response = await fetch(`${baseUrl}/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
-          const data: any = await response.json();
-          const node = data.nodes[args.nodeIds].document;
-
-          if (name === "get_semantic_node") {
-            const semantic = {
-              name: node.name,
-              layout: { mode: node.layoutMode, gap: node.itemSpacing, padding: `${node.paddingTop}px` },
-              nomenclature: node.name.includes('[Slot]') ? 'DYNAMIC_SLOT' : (node.name.includes('/') ? 'STRUCTURED' : 'GENERIC')
-            };
-            resultText = JSON.stringify(semantic, null, 2);
-          } else {
-            const fingerprint = node.children?.map((c: any) => `${c.name}:${c.visible}`).join('|') || "leaf";
-            resultText = `STRUCTURAL_ID:${fingerprint}`;
-          }
-          break;
+      if (name === "get_figma_file") {
+        const response = await fetch(`${baseUrl}/files/${args.fileKey}`, { headers });
+        responseData = await response.json();
+      } 
+      else if (name === "get_semantic_node" || name === "get_node_checksum") {
+        const response = await fetch(`${baseUrl}/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
+        const data: any = await response.json();
+        
+        if (!data.nodes || !data.nodes[args.nodeIds]) {
+          throw new Error(`Node ${args.nodeIds} not found. Check your token/fileKey.`);
         }
+        
+        const node = data.nodes[args.nodeIds].document;
 
-        case "get_figma_file": {
-          const response = await fetch(`${baseUrl}/files/${args.fileKey}`, { headers });
-          const data = await response.json();
-          resultText = JSON.stringify(data, null, 2);
-          break;
+        if (name === "get_semantic_node") {
+          responseData = {
+            name: node.name,
+            layout: { mode: node.layoutMode, gap: node.itemSpacing, padding: `${node.paddingTop}px` },
+            nomenclature: node.name.includes('[Slot]') ? 'DYNAMIC_SLOT' : (node.name.includes('/') ? 'STRUCTURED' : 'GENERIC')
+          };
+        } else {
+          const fingerprint = node.children?.map((c: any) => `${c.name}:${c.visible}`).join('|') || "leaf";
+          responseData = `STRUCTURAL_ID:${fingerprint}`;
         }
-
-        default:
-          return res.status(400).json({ jsonrpc: "2.0", id: requestId, error: { message: `Tool ${name} not found` } });
       }
 
       return res.status(200).json({
         jsonrpc: "2.0", id: requestId,
-        result: { content: [{ type: "text", text: resultText }] }
+        result: { content: [{ type: "text", text: JSON.stringify(responseData, null, 2) }] }
       });
     }
 
-    // Crucial: Fallback for unhandled methods to prevent 404 errors
+    // Fallback
     return res.status(200).json({ jsonrpc: "2.0", id: requestId, result: {} });
 
   } catch (error: any) {
-    return res.status(500).json({ jsonrpc: "2.0", id: req.body?.id || null, error: { message: error.message } });
+    return res.status(500).json({ 
+      jsonrpc: "2.0", 
+      id: req.body?.id || null, 
+      error: { code: -32603, message: error.message } 
+    });
   }
 }
