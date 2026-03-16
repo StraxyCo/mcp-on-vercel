@@ -9,15 +9,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const body = req.body || {};
+    const requestId = body.id || null; // Ensure we always have an ID for JSON-RPC
 
-    // 2. Initialize MCP
+    // 2. Initialize MCP (Handshake)
     if (body.method === 'initialize') {
       return res.status(200).json({
-        jsonrpc: "2.0", id: body.id,
+        jsonrpc: "2.0", id: requestId,
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-factory-bridge", version: "3.0.0" }
+          serverInfo: { name: "figma-factory-bridge", version: "3.1.0" }
         }
       });
     }
@@ -25,25 +26,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 3. Define Tools (The Factory Set)
     if (body.method === 'tools/list') {
       return res.status(200).json({
-        jsonrpc: "2.0", id: body.id,
+        jsonrpc: "2.0", id: requestId,
         result: {
           tools: [
             {
               name: "get_semantic_node",
-              description: "Extracts Computed CSS, Variables, and Nomenclature signals ([Slot], Container/ names).",
+              description: "Extracts Computed CSS, Variables, and Nomenclature signals.",
               inputSchema: { 
                 type: "object", 
                 properties: { 
                   fileKey: { type: "string" }, 
                   nodeIds: { type: "string" },
-                  isDisko: { type: "boolean", description: "Set to true if using Agency (DISKO) workspace." }
+                  isDisko: { type: "boolean" }
                 }, 
                 required: ["fileKey", "nodeIds"] 
               }
             },
             {
               name: "get_node_checksum",
-              description: "Generates a structural fingerprint of a node's children and visibility for memory logic.",
+              description: "Generates a structural fingerprint for memory logic.",
               inputSchema: { 
                 type: "object", 
                 properties: { 
@@ -71,58 +72,57 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    // 4. Tool Execution & Dual-Token Logic (STRAXY vs DISKO)
+    // 4. Tool Execution (Switch logic from your stable version)
     if (body.method === 'tools/call') {
       const { name, arguments: args } = body.params || {};
-      
-      // Token Selection Logic
-      // Defaults to STRAXY unless isDisko is explicitly true
       const figmaToken = args.isDisko ? process.env.FIGMA_TOKEN_DISKO : process.env.FIGMA_TOKEN_STRAXY;
-
-      const baseUrl = `https://api.figma.com/v1/files/${args.fileKey}`;
       const headers = { 'X-Figma-Token': figmaToken! };
+      const baseUrl = "https://api.figma.com/v1";
 
-      if (name === "get_semantic_node" || name === "get_node_checksum") {
-        const response = await fetch(`${baseUrl}/nodes?ids=${args.nodeIds}`, { headers });
-        const data: any = await response.json();
-        
-        if (!data.nodes || !data.nodes[args.nodeIds]) {
-          throw new Error(`Node ${args.nodeIds} not found. Ensure you are using the correct token (STRAXY vs DISKO).`);
-        }
-        
-        const node = data.nodes[args.nodeIds].document;
+      let resultText = "";
 
-        if (name === "get_semantic_node") {
-          const semantic = {
-            name: node.name,
-            type: node.type,
-            layout: { 
-              mode: node.layoutMode, 
-              padding: `${node.paddingTop}px ${node.paddingRight}px ${node.paddingBottom}px ${node.paddingLeft}px`, 
-              gap: node.itemSpacing 
-            },
-            logic: { visible: node.visible, boundVariables: node.boundVariables },
-            nomenclature: node.name.includes('[Slot]') ? 'DYNAMIC_SLOT' : (node.name.includes('/') ? 'STRUCTURED' : 'GENERIC')
-          };
-          return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: JSON.stringify(semantic, null, 2) }] } });
+      switch (name) {
+        case "get_semantic_node":
+        case "get_node_checksum": {
+          const response = await fetch(`${baseUrl}/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
+          const data: any = await response.json();
+          const node = data.nodes[args.nodeIds].document;
+
+          if (name === "get_semantic_node") {
+            const semantic = {
+              name: node.name,
+              layout: { mode: node.layoutMode, gap: node.itemSpacing, padding: `${node.paddingTop}px` },
+              nomenclature: node.name.includes('[Slot]') ? 'DYNAMIC_SLOT' : (node.name.includes('/') ? 'STRUCTURED' : 'GENERIC')
+            };
+            resultText = JSON.stringify(semantic, null, 2);
+          } else {
+            const fingerprint = node.children?.map((c: any) => `${c.name}:${c.visible}`).join('|') || "leaf";
+            resultText = `STRUCTURAL_ID:${fingerprint}`;
+          }
+          break;
         }
 
-        if (name === "get_node_checksum") {
-          const fingerprint = node.children?.map((c: any) => `${c.name}:${c.visible}`).join('|') || "leaf";
-          return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: `STRUCTURAL_ID:${fingerprint}` }] } });
+        case "get_figma_file": {
+          const response = await fetch(`${baseUrl}/files/${args.fileKey}`, { headers });
+          const data = await response.json();
+          resultText = JSON.stringify(data, null, 2);
+          break;
         }
+
+        default:
+          return res.status(400).json({ jsonrpc: "2.0", id: requestId, error: { message: `Tool ${name} not found` } });
       }
 
-      if (name === "get_figma_file") {
-        const response = await fetch(baseUrl, { headers });
-        const data = await response.json();
-        return res.status(200).json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] } });
-      }
+      return res.status(200).json({
+        jsonrpc: "2.0", id: requestId,
+        result: { content: [{ type: "text", text: resultText }] }
+      });
     }
 
-    return res.status(404).json({ error: "Method not found" });
+    // Crucial: Fallback for unhandled methods to prevent 404 errors
+    return res.status(200).json({ jsonrpc: "2.0", id: requestId, result: {} });
 
   } catch (error: any) {
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ jsonrpc: "2.0", id: req.body?.id || null, error: { message: error.message } });
   }
 }
