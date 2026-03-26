@@ -2,7 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    // AUTHENTIFICATION : Inchangée pour la stabilité
+    // 1. AUTHENTIFICATION
     const bridgeAuth = req.headers['x-bridge-auth'];
     if (bridgeAuth !== process.env.BRIDGE_PASSWORD) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -10,36 +10,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const body = req.body || {};
 
-    // 1. HANDSHAKE
+    // 2. HANDSHAKE
     if (body.method === 'initialize') {
       return res.status(200).json({
         jsonrpc: "2.0", id: body.id,
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-factory-bridge", version: "3.6.0" }
+          serverInfo: { name: "straxy-factory-bridge", version: "3.7.0" }
         }
       });
     }
 
-    // 2. TOOL DEFINITIONS (Ajout de get_styles)
+    // 3. TOOL DEFINITIONS
     if (body.method === 'tools/list') {
       return res.status(200).json({
         jsonrpc: "2.0", id: body.id,
         result: {
           tools: [
-            { name: "get_figma_file", description: "Full file map (small files only).", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
-            { name: "get_file_structure", description: "LIGHTWEIGHT Treemap (Name/ID/Type). Use depth=1 or 2.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeId: { type: "string" }, depth: { type: "number" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeId"] } },
-            { name: "get_variables", description: "Extract local variables (Design Tokens) from Figma.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
-            { name: "get_styles", description: "Extract shared Styles (Typography, Effects) metadata from Figma.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
-            { name: "get_semantic_node", description: "Detailed audit: CSS, Layout, Dimensions, Styles.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } },
+            { name: "get_figma_file", description: "Full file map.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
+            { name: "get_file_structure", description: "LIGHTWEIGHT Treemap (Name/ID/Type).", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeId: { type: "string" }, depth: { type: "number" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeId"] } },
+            { name: "get_library_assets", description: "Extract published Styles or Components (Oversize protected).", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, assetType: { type: "string", enum: ["styles", "components", "component_sets"] }, filter: { type: "string", description: "For styles: TEXT, FILL, EFFECT" }, isDisko: { type: "boolean" } }, required: ["fileKey", "assetType"] } },
+            { name: "get_semantic_node", description: "Detailed audit: CSS, Layout, Styles, and Bound Variables.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } },
             { name: "get_node_checksum", description: "Structural fingerprint.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } }
           ]
         }
       });
     }
 
-    // 3. TOOL EXECUTION
+    // 4. TOOL EXECUTION
     if (body.method === 'tools/call') {
       const { name, arguments: args } = body.params || {};
       const token = args.isDisko ? process.env.FIGMA_TOKEN_DISKO : process.env.FIGMA_TOKEN_STRAXY;
@@ -47,25 +46,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       
       let payload: any = null;
 
-      // TOOL: Get Styles (Extraction des métadonnées de styles)
-      if (name === "get_styles") {
-        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/styles`, { headers });
-        payload = await response.json();
+      // TOOL: Get Library Assets (Pagination à 40 items)
+      if (name === "get_library_assets") {
+        const endpoint = args.assetType;
+        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/${endpoint}`, { headers });
+        const data: any = await response.json();
+        let assets = data.meta?.[endpoint] || [];
+        
+        if (args.filter && endpoint === 'styles') {
+          assets = assets.filter((s: any) => s.style_type === args.filter);
+        }
+
+        payload = {
+          total_found: assets.length,
+          type: endpoint,
+          items: assets.slice(0, 40).map((a: any) => ({
+            key: a.key, name: a.name, id: a.node_id,
+            description: a.description || "",
+            ...(a.style_type && { style_type: a.style_type })
+          }))
+        };
       }
 
-      // TOOL: Get Variables
-      else if (name === "get_variables") {
-        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/variables/local`, { headers });
-        payload = await response.json();
-      }
-
-      // TOOL: Get File Structure (Discovery légère)
+      // TOOL: Get File Structure
       else if (name === "get_file_structure") {
         const depth = args.depth || 1;
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeId}&depth=${depth}`, { headers });
         const data: any = await response.json();
         const node = data.nodes[Object.keys(data.nodes)[0]].document;
-        
         const mapChildren = (n: any): any => ({
           id: n.id, name: n.name, type: n.type,
           children: n.children?.map((c: any) => mapChildren(c)) || []
@@ -73,33 +81,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         payload = { tree: mapChildren(node) };
       }
 
+      // TOOL: Get Semantic Node (Incluant boundVariables pour mode hybride)
+      else if (name === "get_semantic_node") {
+        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
+        const data: any = await response.json();
+        if (!data || !data.nodes) throw new Error("Node not found.");
+        const node = data.nodes[Object.keys(data.nodes)[0]].document;
+
+        payload = {
+          name: node.name, type: node.type,
+          dimensions: node.absoluteBoundingBox,
+          layout: { mode: node.layoutMode, gap: node.itemSpacing, padding: `${node.paddingTop}px` },
+          styles: node.styles || {},
+          boundVariables: node.boundVariables || {},
+          children: node.children?.map((c: any) => ({ name: c.name, id: c.id, type: c.type }))
+        };
+      }
+
+      // TOOL: Get Node Checksum
+      else if (name === "get_node_checksum") {
+        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
+        const data: any = await response.json();
+        const node = data.nodes[Object.keys(data.nodes)[0]].document;
+        payload = { 
+          structural_id: node.children?.map((c: any) => `${c.name}:${c.visible}`).join('|') || "leaf",
+          variant_mapping: node.children?.map((c: any) => ({ name: c.name, id: c.id }))
+        };
+      }
+
+      // TOOL: Get Figma File
       else if (name === "get_figma_file") {
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}?depth=1`, { headers });
         payload = await response.json();
-      } 
-      else if (name === "get_semantic_node" || name === "get_node_checksum") {
-        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
-        const data: any = await response.json();
-        
-        if (!data || !data.nodes) throw new Error("Figma API Error: Node not found.");
-        const nodeKey = Object.keys(data.nodes)[0];
-        const node = data.nodes[nodeKey].document;
-
-        if (name === "get_semantic_node") {
-          payload = {
-            name: node.name, type: node.type,
-            dimensions: node.absoluteBoundingBox, // Pour Law #11
-            layout: { mode: node.layoutMode, gap: node.itemSpacing, padding: `${node.paddingTop}px` },
-            // Ajout des clés de styles pour comparaison avec .factory/styles/
-            styles: node.styles || {}, 
-            children: node.children?.map((c: any) => ({ name: c.name, id: c.id, type: c.type }))
-          };
-        } else {
-          payload = { 
-            structural_id: node.children?.map((c: any) => `${c.name}:${c.visible}`).join('|') || "leaf",
-            variant_mapping: node.children?.map((c: any) => ({ name: c.name, id: c.id }))
-          };
-        }
       }
 
       return res.status(200).json({
