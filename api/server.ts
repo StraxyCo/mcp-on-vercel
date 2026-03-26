@@ -17,12 +17,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-factory-bridge", version: "3.5.0" }
+          serverInfo: { name: "figma-factory-bridge", version: "3.6.0" }
         }
       });
     }
 
-    // 2. TOOL DEFINITIONS (Ajout de get_variables)
+    // 2. TOOL DEFINITIONS (Ajout de get_styles)
     if (body.method === 'tools/list') {
       return res.status(200).json({
         jsonrpc: "2.0", id: body.id,
@@ -31,7 +31,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             { name: "get_figma_file", description: "Full file map (small files only).", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
             { name: "get_file_structure", description: "LIGHTWEIGHT Treemap (Name/ID/Type). Use depth=1 or 2.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeId: { type: "string" }, depth: { type: "number" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeId"] } },
             { name: "get_variables", description: "Extract local variables (Design Tokens) from Figma.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
-            { name: "get_semantic_node", description: "Detailed audit: CSS, Layout, Dimensions.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } },
+            { name: "get_styles", description: "Extract shared Styles (Typography, Effects) metadata from Figma.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
+            { name: "get_semantic_node", description: "Detailed audit: CSS, Layout, Dimensions, Styles.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } },
             { name: "get_node_checksum", description: "Structural fingerprint.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } }
           ]
         }
@@ -46,8 +47,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       
       let payload: any = null;
 
-      // TOOL: Get Variables (La nouvelle sonde à Design Tokens)
-      if (name === "get_variables") {
+      // TOOL: Get Styles (Extraction des métadonnées de styles)
+      if (name === "get_styles") {
+        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/styles`, { headers });
+        payload = await response.json();
+      }
+
+      // TOOL: Get Variables
+      else if (name === "get_variables") {
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/variables/local`, { headers });
         payload = await response.json();
       }
@@ -74,15 +81,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
         const data: any = await response.json();
         
-        if (!data.nodes) throw new Error("Figma API Error: Node not found.");
+        if (!data || !data.nodes) throw new Error("Figma API Error: Node not found.");
         const nodeKey = Object.keys(data.nodes)[0];
         const node = data.nodes[nodeKey].document;
 
         if (name === "get_semantic_node") {
           payload = {
             name: node.name, type: node.type,
-            dimensions: node.absoluteBoundingBox, // Pour Law #11 (1312px)
+            dimensions: node.absoluteBoundingBox, // Pour Law #11
             layout: { mode: node.layoutMode, gap: node.itemSpacing, padding: `${node.paddingTop}px` },
+            // Ajout des clés de styles pour comparaison avec .factory/styles/
+            styles: node.styles || {}, 
             children: node.children?.map((c: any) => ({ name: c.name, id: c.id, type: c.type }))
           };
         } else {
