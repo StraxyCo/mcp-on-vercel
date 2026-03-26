@@ -2,6 +2,7 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
+    // AUTHENTIFICATION : Inchangée pour la stabilité
     const bridgeAuth = req.headers['x-bridge-auth'];
     if (bridgeAuth !== process.env.BRIDGE_PASSWORD) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -16,19 +17,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "figma-factory-bridge", version: "3.4.0" }
+          serverInfo: { name: "figma-factory-bridge", version: "3.5.0" }
         }
       });
     }
 
-    // 2. TOOL DEFINITIONS (Ajout de get_file_structure)
+    // 2. TOOL DEFINITIONS (Ajout de get_variables)
     if (body.method === 'tools/list') {
       return res.status(200).json({
         jsonrpc: "2.0", id: body.id,
         result: {
           tools: [
             { name: "get_figma_file", description: "Full file map (small files only).", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
-            { name: "get_file_structure", description: "LIGHTWEIGHT Treemap (Name/ID/Type) for navigation. Use depth=1 or 2.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeId: { type: "string" }, depth: { type: "number" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeId"] } },
+            { name: "get_file_structure", description: "LIGHTWEIGHT Treemap (Name/ID/Type). Use depth=1 or 2.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeId: { type: "string" }, depth: { type: "number" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeId"] } },
+            { name: "get_variables", description: "Extract local variables (Design Tokens) from Figma.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey"] } },
             { name: "get_semantic_node", description: "Detailed audit: CSS, Layout, Dimensions.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } },
             { name: "get_node_checksum", description: "Structural fingerprint.", inputSchema: { type: "object", properties: { fileKey: { type: "string" }, nodeIds: { type: "string" }, isDisko: { type: "boolean" } }, required: ["fileKey", "nodeIds"] } }
           ]
@@ -44,29 +46,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       
       let payload: any = null;
 
-      // TOOL: Get File Structure (Version Robuste pour Drill-Down)
-if (name === "get_file_structure") {
-  const depth = args.depth || 2; // Par défaut on prend 2 niveaux
-  const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeId}&depth=${depth}`, { headers });
-  const data: any = await response.json();
-  
-  if (!data.nodes || !data.nodes[args.nodeId]) {
-    throw new Error(`Node ${args.nodeId} introuvable pour la structure.`);
-  }
+      // TOOL: Get Variables (La nouvelle sonde à Design Tokens)
+      if (name === "get_variables") {
+        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/variables/local`, { headers });
+        payload = await response.json();
+      }
 
-  const node = data.nodes[args.nodeId].document;
-  
-  // Fonction de mapping récursive pour transformer le JSON Figma en Treemap léger
-  const mapChildren = (n: any): any => ({
-    id: n.id, 
-    name: n.name, 
-    type: n.type,
-    // On ne descend que si l'API Figma a renvoyé des enfants pour ce niveau de depth
-    children: n.children ? n.children.map((c: any) => mapChildren(c)) : []
-  });
-
-  payload = { tree: mapChildren(node) };
-}
+      // TOOL: Get File Structure (Discovery légère)
+      else if (name === "get_file_structure") {
+        const depth = args.depth || 1;
+        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeId}&depth=${depth}`, { headers });
+        const data: any = await response.json();
+        const node = data.nodes[Object.keys(data.nodes)[0]].document;
+        
+        const mapChildren = (n: any): any => ({
+          id: n.id, name: n.name, type: n.type,
+          children: n.children?.map((c: any) => mapChildren(c)) || []
+        });
+        payload = { tree: mapChildren(node) };
+      }
 
       else if (name === "get_figma_file") {
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}?depth=1`, { headers });
@@ -75,7 +73,10 @@ if (name === "get_file_structure") {
       else if (name === "get_semantic_node" || name === "get_node_checksum") {
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
         const data: any = await response.json();
-        const node = data.nodes[Object.keys(data.nodes)[0]].document;
+        
+        if (!data.nodes) throw new Error("Figma API Error: Node not found.");
+        const nodeKey = Object.keys(data.nodes)[0];
+        const node = data.nodes[nodeKey].document;
 
         if (name === "get_semantic_node") {
           payload = {
