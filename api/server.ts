@@ -44,20 +44,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       
       let payload: any = null;
 
-      // TOOL: Get File Structure (La nouveauté "Légère")
-      if (name === "get_file_structure") {
-        const depth = args.depth || 1;
-        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeId}&depth=${depth}`, { headers });
-        const data: any = await response.json();
-        const node = data.nodes[Object.keys(data.nodes)[0]].document;
-        
-        // On ne renvoie que l'ID, le Nom et le Type pour construire le treemap
-        const mapChildren = (n: any): any => ({
-          id: n.id, name: n.name, type: n.type,
-          children: n.children?.map((c: any) => mapChildren(c)) || []
-        });
-        payload = { tree: mapChildren(node) };
-      }
+      // TOOL: Get File Structure (Version Robuste pour Drill-Down)
+if (name === "get_file_structure") {
+  const depth = args.depth || 2; // Par défaut on prend 2 niveaux
+  const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeId}&depth=${depth}`, { headers });
+  const data: any = await response.json();
+  
+  if (!data.nodes || !data.nodes[args.nodeId]) {
+    throw new Error(`Node ${args.nodeId} introuvable pour la structure.`);
+  }
+
+  const node = data.nodes[args.nodeId].document;
+  
+  // Fonction de mapping récursive pour transformer le JSON Figma en Treemap léger
+  const mapChildren = (n: any): any => ({
+    id: n.id, 
+    name: n.name, 
+    type: n.type,
+    // On ne descend que si l'API Figma a renvoyé des enfants pour ce niveau de depth
+    children: n.children ? n.children.map((c: any) => mapChildren(c)) : []
+  });
+
+  payload = { tree: mapChildren(node) };
+}
 
       else if (name === "get_figma_file") {
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}?depth=1`, { headers });
