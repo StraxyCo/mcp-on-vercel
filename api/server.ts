@@ -81,20 +81,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         payload = { tree: mapChildren(node) };
       }
 
-      // TOOL: Get Semantic Node (Incluant boundVariables pour mode hybride)
+// TOOL: Get Semantic Node (ENHANCED for D2C & Native Properties)
       else if (name === "get_semantic_node") {
         const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}`, { headers });
         const data: any = await response.json();
         if (!data || !data.nodes) throw new Error("Node not found.");
-        const node = data.nodes[Object.keys(data.nodes)[0]].document;
+        
+        const nodeData = data.nodes[Object.keys(data.nodes)[0]];
+        const node = nodeData.document;
 
         payload = {
-          name: node.name, type: node.type,
+          name: node.name, 
+          type: node.type,
+          id: node.id,
           dimensions: node.absoluteBoundingBox,
-          layout: { mode: node.layoutMode, gap: node.itemSpacing, padding: `${node.paddingTop}px` },
+          layout: { 
+            mode: node.layoutMode, 
+            gap: node.itemSpacing, 
+            padding: `${node.paddingTop}px` 
+          },
+          // NATIVE ARCHITECTURE (For Injection Zones / Instance Swaps) 
+          componentPropertyDefinitions: node.componentPropertyDefinitions || {},
+          componentProperties: node.componentProperties || {},
+          componentPropertyReferences: node.componentPropertyReferences || {},
+          
+          // D2C INTENTS (For the Annotator Plugin) 
+          sharedPluginData: node.sharedPluginData || {},
+          
           styles: node.styles || {},
           boundVariables: node.boundVariables || {},
-          children: node.children?.map((c: any) => ({ name: c.name, id: c.id, type: c.type }))
+          children: node.children?.map((c: any) => ({ 
+            name: c.name, 
+            id: c.id, 
+            type: c.type 
+          }))
         };
       }
 
