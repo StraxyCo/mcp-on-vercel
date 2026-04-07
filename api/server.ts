@@ -83,7 +83,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
 // TOOL: Get Semantic Node (ENHANCED for D2C & Native Properties)
       else if (name === "get_semantic_node") {
-        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}&plugin_data=1623306734532692671`, { headers });
+        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}&plugin_data=shared`, { headers });
         const data: any = await response.json();
         if (!data || !data.nodes) throw new Error("Node not found.");
         
