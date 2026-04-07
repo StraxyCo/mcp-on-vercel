@@ -81,42 +81,95 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         payload = { tree: mapChildren(node) };
       }
 
-// TOOL: Get Semantic Node (ENHANCED for D2C & Native Properties)
-      else if (name === "get_semantic_node") {
-        const response = await fetch(`https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}&plugin_data=shared`, { headers });
-        const data: any = await response.json();
-        if (!data || !data.nodes) throw new Error("Node not found.");
-        
-        const nodeData = data.nodes[Object.keys(data.nodes)[0]];
-        const node = nodeData.document;
+// TOOL: Get Semantic Node (ENHANCED for D2C & Native Properties — v2.0)
+else if (name === "get_semantic_node") {
+  const response = await fetch(
+    `https://api.figma.com/v1/files/${args.fileKey}/nodes?ids=${args.nodeIds}&plugin_data=shared`,
+    { headers }
+  );
+  const data: any = await response.json();
+  if (!data || !data.nodes) throw new Error("Node not found.");
 
-        payload = {
-          name: node.name, 
-          type: node.type,
-          id: node.id,
-          dimensions: node.absoluteBoundingBox,
-          layout: { 
-            mode: node.layoutMode, 
-            gap: node.itemSpacing, 
-            padding: `${node.paddingTop}px` 
-          },
-          // NATIVE ARCHITECTURE (For Injection Zones / Instance Swaps) 
-          componentPropertyDefinitions: node.componentPropertyDefinitions || {},
-          componentProperties: node.componentProperties || {},
-          componentPropertyReferences: node.componentPropertyReferences || {},
-          
-          // D2C INTENTS (For the Annotator Plugin) 
-          sharedPluginData: node.sharedPluginData || {},
-          
-          styles: node.styles || {},
-          boundVariables: node.boundVariables || {},
-          children: node.children?.map((c: any) => ({ 
-            name: c.name, 
-            id: c.id, 
-            type: c.type 
-          }))
-        };
-      }
+  const nodeData = data.nodes[Object.keys(data.nodes)[0]];
+  const node = nodeData.document;
+
+  payload = {
+    name: node.name,
+    type: node.type,
+    id: node.id,
+
+    // ─── DIMENSIONS ───────────────────────────────────────────────
+    dimensions: node.absoluteBoundingBox,
+
+    // ─── LAYOUT (ENHANCED v2.0) ───────────────────────────────────
+    layout: {
+      mode: node.layoutMode,
+      gap: node.itemSpacing,
+
+      // v2.0 — Distinguishes Fill/Space-Between from fixed gap
+      primaryAxisAlignItems: node.primaryAxisAlignItems ?? null,
+      counterAxisAlignItems: node.counterAxisAlignItems ?? null,
+
+      // v2.0 — FIXED / HUG / FILL per axis
+      layoutSizingHorizontal: node.layoutSizingHorizontal ?? null,
+      layoutSizingVertical: node.layoutSizingVertical ?? null,
+
+      // v2.0 — All 4 padding values (was: paddingTop only)
+      padding: {
+        top: node.paddingTop ?? 0,
+        right: node.paddingRight ?? 0,
+        bottom: node.paddingBottom ?? 0,
+        left: node.paddingLeft ?? 0,
+      },
+    },
+
+    // ─── NATIVE ARCHITECTURE (Injection Zones / Instance Swaps) ───
+    componentPropertyDefinitions: node.componentPropertyDefinitions || {},
+    componentProperties: node.componentProperties || {},
+    componentPropertyReferences: node.componentPropertyReferences || {},
+
+    // ─── D2C INTENTS (Annotator Plugin) ───────────────────────────
+    sharedPluginData: node.sharedPluginData || {},
+
+    // ─── STYLES & BOUND VARIABLES ────────────────────────────────
+    styles: node.styles || {},
+    boundVariables: node.boundVariables || {},
+
+    // ─── VISUAL TOKENS — v2.0 ────────────────────────────────────
+    // Raw values for hardcoded detection (L#5 audit)
+    fills: node.fills || [],
+    strokes: node.strokes || [],
+    strokeWeight: node.strokeWeight ?? null,
+    individualStrokeWeights: node.individualStrokeWeights ?? null,
+    cornerRadius: node.cornerRadius ?? null,
+    rectangleCornerRadii: node.rectangleCornerRadii ?? null,
+    effects: node.effects || [],
+
+    // ─── TEXT PROPERTIES — v2.0 ──────────────────────────────────
+    // Conditionally included for TEXT nodes only
+    ...(node.type === "TEXT" && {
+      characters: node.characters,
+      textStyleId: node.textStyleId ?? null,
+      fontSize: node.fontSize ?? null,
+      fontName: node.fontName ?? null,
+      lineHeightPx: node.lineHeightPx ?? null,
+      letterSpacing: node.letterSpacing ?? null,
+      paragraphSpacing: node.paragraphSpacing ?? null,
+      textAlignHorizontal: node.textAlignHorizontal ?? null,
+    }),
+
+    // ─── VISIBILITY & OPACITY — v2.0 ─────────────────────────────
+    visible: node.visible ?? true,
+    opacity: node.opacity ?? 1,
+
+    // ─── CHILDREN ────────────────────────────────────────────────
+    children: node.children?.map((c: any) => ({
+      name: c.name,
+      id: c.id,
+      type: c.type,
+    })),
+  };
+}
 
       // TOOL: Get Node Checksum
       else if (name === "get_node_checksum") {
